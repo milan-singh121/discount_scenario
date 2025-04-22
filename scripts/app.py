@@ -157,20 +157,42 @@ discount_curve = preprocess_discount_curve(sales_data)
 
 # Sidebar Inputs
 st.sidebar.header("📁 Input Parameters")
-articles = sales_data["articleGroupDescription"].dropna().unique()
-brands = sales_data["brandDescription"].dropna().unique()
-article = st.sidebar.selectbox("Select Article Group", sorted(articles))
-brand = st.sidebar.selectbox("Select Brand", sorted(brands))
-leftover_units = st.sidebar.number_input("Remaining Units", min_value=1, value=500)
-remaining_days = st.sidebar.number_input("Remaining Days", min_value=0, value=150)
+
+# Get unique combinations of article and brand
+article_brand_combinations = (
+    sales_data[["articleGroupDescription", "brandDescription"]]
+    .dropna()
+    .drop_duplicates()
+)
+
+# Select Article
+selected_article = st.sidebar.selectbox(
+    "Select Article Group",
+    sorted(sales_data["articleGroupDescription"].dropna().unique()),
+)
+
+# Filter brands based on the selected article
+valid_brands_for_article = article_brand_combinations[
+    article_brand_combinations["articleGroupDescription"] == selected_article
+]["brandDescription"].unique()
+selected_brand = st.sidebar.selectbox("Select Brand", valid_brands_for_article)
+
+# Filter articles based on the selected brand
+valid_articles_for_brand = article_brand_combinations[
+    article_brand_combinations["brandDescription"] == selected_brand
+]["articleGroupDescription"].unique()
+
+# Remaining units, days, and months inputs
+leftover_units = st.sidebar.number_input("Remaining Units", min_value=1, value=100)
+remaining_days = st.sidebar.number_input("Remaining Days", min_value=0, value=100)
 remaining_months = st.sidebar.number_input(
     "OR Remaining Months", min_value=0.0, value=0.0, step=0.1
 )
 
 if st.sidebar.button("🔍 Calculate Optimal Discount"):
     result = compute_discount_scenario(
-        article=article,
-        brand=brand,
+        article=selected_article,
+        brand=selected_brand,
         leftover_units=leftover_units,
         remaining_days=remaining_days if remaining_days > 0 else None,
         remaining_months=remaining_months if remaining_months > 0 else None,
