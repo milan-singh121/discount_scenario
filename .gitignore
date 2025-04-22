@@ -1,0 +1,20 @@
+# Ignore Streamlit cache files
+.streamlit/
+
+# Ignore cache created by Streamlit @st.cache_data decorator
+__pycache__/
+
+# Ignore data files that should not be in version control
+*.parquet
+
+# Ignore Python bytecode files
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environment directories
+venv/
+.venv/
+
+# Ignore Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
