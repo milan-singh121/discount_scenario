@@ -1,19 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.optimize import curve_fit
 import os
-
-
-# --- Logistic function for curve fitting ---
-def logistic(x, L, k, x0):
-    return L / (1 + np.exp(-k * (x - x0)))
-
-
-# --- Weighted average utility ---
-def weighted_avg(group, value_col, weight_col="quantity"):
-    d, w = group[value_col], group[weight_col]
-    return (d * w).sum() / w.sum() if w.sum() != 0 else np.nan
+import warnings
 
 
 # --- Cached data loading ---
@@ -29,18 +18,13 @@ def load_sales_data():
 
     # Load the data
     df = pd.read_parquet(data_file_path)
-    df = df[df["Inhouse_Brand"] == True].copy()
-    df["salesDate"] = pd.to_datetime(df["salesDate"])
-    df = df[df["salesDate"].dt.month.isin([3, 4, 5, 6, 7, 8, 9])]
     df["discount_bin"] = (df["Discount%"] / 5).round() * 5
     return df
 
 
 # --- Cached discount curve preprocessing ---
 @st.cache_data
-def preprocess_discount_curve(
-    sales_data: pd.DataFrame, min_margin_required: float = 50
-):
+def preprocess_discount_curve(sales_data: pd.DataFrame):
     group = (
         sales_data.groupby(
             ["articleGroupDescription", "brandDescription", "discount_bin"]
@@ -49,23 +33,38 @@ def preprocess_discount_curve(
             lambda g: pd.Series(
                 {
                     "monthly_qty": g["quantity"].sum() / 7,
-                    "avg_margin%": (
-                        (
-                            weighted_avg(g, "retailPrice")
-                            - weighted_avg(g, "purchasePrice_barcode")
-                        )
-                        / weighted_avg(g, "retailPrice")
-                        * 100
-                    ),
                 }
             )
         )
         .reset_index()
     )
-    return group[group["avg_margin%"] >= min_margin_required]
+    return group
 
 
-# --- Discount suggestion logic ---
+def variableResistanceModel(context, alpha=0.05, max_discount=90):
+    inventory = context.get("inventory_level", 100)
+    days_remaining = context.get("days_remaining", 30)
+    sales_velocity = context.get("sales_velocity", 1)
+
+    target_sales_per_day = inventory / days_remaining
+
+    for discount in range(0, max_discount + 1, 5):
+        predicted_sales = sales_velocity * (1 + alpha * discount)
+        if predicted_sales >= target_sales_per_day:
+            return discount
+
+    # Fallback: pick best performing discount
+    best_discount = 0
+    max_units_sold = -float("inf")
+    for discount in range(max_discount, -1, -5):
+        predicted_sales = sales_velocity * (1 + alpha * discount)
+        if predicted_sales > max_units_sold:
+            best_discount = discount
+            max_units_sold = predicted_sales
+
+    return best_discount
+
+
 def compute_discount_scenario(
     article: str,
     brand: str,
@@ -73,78 +72,50 @@ def compute_discount_scenario(
     discount_curve: pd.DataFrame,
     remaining_days: int = None,
     remaining_months: int = None,
-    min_margin_required: float = 50,
 ):
     if remaining_days:
-        remaining_months = remaining_days / 30
-    elif not remaining_months:
-        remaining_months = 5
+        days_remaining = remaining_days
+    elif remaining_months:
+        days_remaining = remaining_months * 30
+    else:
+        days_remaining = 150  # default value
 
+    # Filter data for the article-brand combo
     subset = discount_curve[
         (discount_curve["articleGroupDescription"] == article)
         & (discount_curve["brandDescription"] == brand)
         & (discount_curve["discount_bin"] > 0)
     ].copy()
 
-    if len(subset) < 4:
+    if subset.empty or len(subset) < 2:
         return {
             "articleGroupDescription": article,
             "brandDescription": brand,
             "leftover_qty": leftover_units,
             "best_discount_bin": np.nan,
             "expected_margin%": np.nan,
-            "note": "Insufficient data after filtering",
+            "note": "Insufficient historical data",
         }
 
-    X = subset["discount_bin"].values
-    y = subset["monthly_qty"].values
+    # Estimate daily sales velocity from historical monthly_qty
+    monthly_avg_sales = subset["monthly_qty"].mean()
+    sales_velocity = monthly_avg_sales / 30  # convert to daily
 
-    try:
-        popt, _ = curve_fit(logistic, X, y, p0=[max(y), 0.3, np.median(X)], maxfev=5000)
-        L, k, x0 = popt
+    context = {
+        "inventory_level": leftover_units,
+        "days_remaining": days_remaining,
+        "sales_velocity": sales_velocity,
+    }
 
-        target_qty_per_month = leftover_units / remaining_months
-        ratio = L / target_qty_per_month
+    best_discount = variableResistanceModel(context)
 
-        if ratio <= 1:
-            required_discount = 80
-            note = "Target exceeds modeled capacity — max discount applied"
-        else:
-            discount_needed = x0 - (1 / k) * np.log(ratio - 1)
-            required_discount = np.clip(discount_needed, 0, 90)
-            required_discount = round(required_discount / 5) * 5
-            note = ""
-
-        margin_match = subset[subset["discount_bin"] == required_discount]
-        if not margin_match.empty:
-            margin = margin_match["avg_margin%"].values[0]
-        else:
-            closest = subset.iloc[
-                (subset["discount_bin"] - required_discount).abs().argsort()[:1]
-            ]
-            margin = closest["avg_margin%"].values[0]
-
-        if margin < min_margin_required:
-            note = f"Margin {margin:.2f}% below min required {min_margin_required}%"
-
-        return {
-            "articleGroupDescription": article,
-            "brandDescription": brand,
-            "leftover_qty": leftover_units,
-            "best_discount_bin": required_discount,
-            "expected_margin%": margin,
-            "note": note,
-        }
-
-    except RuntimeError:
-        return {
-            "articleGroupDescription": article,
-            "brandDescription": brand,
-            "leftover_qty": leftover_units,
-            "best_discount_bin": np.nan,
-            "expected_margin%": np.nan,
-            "note": "Model fitting failed",
-        }
+    return {
+        "articleGroupDescription": article,
+        "brandDescription": brand,
+        "leftover_qty": leftover_units,
+        "best_discount_bin": best_discount,
+        "note": "Heuristic resistance model used",
+    }
 
 
 # --- Streamlit UI ---
@@ -204,14 +175,13 @@ if st.sidebar.button("🔍 Calculate Optimal Discount"):
 
     if result.get("best_discount_bin") is not np.nan:
         st.success("🎯 Optimal Discount Recommendation")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         col1.metric("📉 Discount", f"{int(result['best_discount_bin'])}%")
-        col2.metric("💰 Expected Margin", f"{result['expected_margin%']:.2f}%")
-        col3.metric("📦 Stock Left", f"{int(result['leftover_qty'])} units")
+        col2.metric("📦 Stock Left", f"{int(result['leftover_qty'])} units")
 
         st.markdown(f"""
-        **🧾 Article:** `{result["articleGroupDescription"]}`  
-        **🏷️ Brand:** `{result["brandDescription"]}`  
+        **🧾 Article:** `{result["articleGroupDescription"]}`
+        **🏷️ Brand:** `{result["brandDescription"]}`
         """)
 
     else:
