@@ -177,7 +177,7 @@ if st.sidebar.button("🔍 Calculate Optimal Discount"):
         st.success("🎯 Optimal Discount Recommendation")
         col1, col2 = st.columns(2)
         col1.metric("📉 Discount", f"{int(result['best_discount_bin'])}%")
-        col2.metric("📦 Stock Left", f"{int(result['leftover_qty'])} units")
+        col2.metric("📦 Stock To Sell", f"{int(result['leftover_qty'])} units")
 
         st.markdown(f"""
         **🧾 Article:** `{result["articleGroupDescription"]}`
